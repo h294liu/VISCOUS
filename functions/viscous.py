@@ -1,66 +1,61 @@
-# Version V0-2021
-# The algorithm is proposed by Sheikholeslami et al. (2021)
-#----------------------------------------------------------------
-# Programmed by Hongli Liu, University of Saskatchewan.
-# E-mail: hongli.liu@usask.ca
+# Programmed by Hongli Liu (hongli.liu@usask.ca)
 # ----------------------------------------------------------------
-# Original paper:
+# The algorithm is proposed by Sheikholeslami et al. (2021).
 # Sheikholeslami, R., Gharari, S., Papalexiou, S. M., & Clark, M. P. (2021) 
-# VISCOUS: A variance-based sensitivity analysis using copulas for efficient identification of dominant hydrological processes.
-# Water Resources Research, 57, e2020WR028435. https://doi.org/10.1029/2020WR028435
+# VISCOUS: A variance-based sensitivity analysis using copulas for efficient identification of dominant hydrological processes. Water Resources Research, 57, e2020WR028435. https://doi.org/10.1029/2020WR028435
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from scipy.stats import norm, gaussian_kde
-from scipy.stats import multivariate_normal
-from scipy.stats.mstats import mquantiles
+from scipy.stats import norm, gaussian_kde, multivariate_normal
 from sklearn.mixture import GaussianMixture
-from sklearn import preprocessing
-import itertools
-import matplotlib as mpl
 import matplotlib.pyplot as plt
-
+import sys
 
 def define_GSA_variable_index(nVar):
-    """ Create variable indices for which the variance-based sensitivity indices are estimated.
+    """ 
+    Create variable indices for which the variance-based sensitivity indices are estimated.
     GSA: global sensitivity analysis.
     
     Parameters
     -------
-    nVar: the total number of input variables (eg, parameters).
+    nVar: int. Total number of input variables (eg, parameters).
     
     Returns
     -------
-    GSAIndex : the indices of variable groups to be evaluated. For example,    
-    GSAIndex = {[1],[2],[3],[1,2],[1,3],[2,3],...} for group of variables.
+    GSAIndex : list. List of indices of x variable groups to be evaluated. 
+    eg, [[0]], or [[0],[1],[2]], or [[0,1],[0,2],[1,2]]. 
     
     Notes
     -------
-    For now only the first-order sensitivity is calculated, thus {[1],[2],[3]}.
-    This code can be extended to explicitly calculate interaction effect (eg, second-order, third-order sensitivity indices)."""
+    For now only the first-order sensitivity is calculated, thus [[1],[2],[3]].
+    This code can be extended to explicitly calculate interaction effect 
+    (eg, second-order, third-order sensitivity indices)."""
     
     GSAIndex = []
     for d in range(nVar):
-        GSAIndex.append([d]) # Index starts from zero by following python syntax.
+        GSAIndex.append([d]) # Index starts from zero following python syntax.
     return GSAIndex
 
 def standardize_data(data):
-    """ Standradize random data into the standard normal distribution.
+    """ 
+    Standradize random data into the standard normal distribution using kernel density estimation.
     referenece: https://stackoverflow.com/questions/52221829/python-how-to-get-cumulative-distribution-function-for-continuous-data-values
+    reference: https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.gaussian_kde.html
      
     Parameters
     -------
-    data: data array to be standardized.
+    data: array, shape (n, 1) or (n,). Data array to be standardized.
     
     Returns
     -------
-    dataNorm: standardized data.
+    z_data: array, shape is the sames as data. Standardized data.
     
-     Notes
+    Notes
     -------
-    A faster way of calculating CDF. 
+    A faster way of calculating CDF. Put it here in case someone needs it.
     Modify source code of kde.integrate_box_1d, and make it process array, not element-by-element. 
+    BUT this requires a large memory. 
     reference: https://stackoverflow.com/questions/47417986/using-scipy-gaussian-kernel-density-estimation-to-calculate-cdf-inverse
     from scipy.special import ndtr
     stdev = np.sqrt(kde.covariance)[0, 0]
@@ -69,14 +64,48 @@ def standardize_data(data):
     data_shape = np.shape(data)
     data = data.reshape((1,len(data)))
     
+    # construct a kernel-density estimate using Gaussian kernels.
     kde = gaussian_kde(data)
+    
+    # CDF function
+    cdf_function = np.vectorize(lambda x: kde.integrate_box_1d(-np.inf, x))    
+    data_cdf = cdf_function(data)
+    
+    # calculate the cdf corresponding z_data in the standard normal dist.
+    z_data = norm.ppf(data_cdf, loc=0, scale=1)
+    z_data = z_data.reshape(data_shape)
+        
+    return z_data 
+
+def sample_from_data(data, n_samples):
+    """ 
+    Generate random samples from input data using the kernel density function.
+     
+    Parameters
+    -------
+    data: array, shape (n, 1) or (n,). Input data to build the kernel density function.
+    n_samples : int. Number of samples to generate from the built kernel sensity function.
+    
+    Returns
+    -------
+    sample : array, shape (n_samples, 1). Randomly generated sample.
+    z_sample: array, shape (n_samples, 1). Standardized sample values.
+    z_sample_pdf: array, shape (n_samples, 1). PDF of standardized sample. """    
+
+    data = data.reshape((1,len(data)))
+    kde = gaussian_kde(data)                         # build the kernel density function.
+    sample = kde.resample(n_samples)                 # generate samples.
+
     cdf_function = np.vectorize(lambda x: kde.integrate_box_1d(-np.inf, x))
-    cdf = cdf_function(data)
+    sampleCDF = cdf_function(sample)                 # calcualte sample cdf in kde.
     
-    dataNorm = norm.ppf(cdf, loc=0, scale=1)
-    dataNorm = dataNorm.reshape(data_shape)
+    z_sample = norm.ppf(sampleCDF, loc=0, scale=1)   # calcualte inverse of cdf in the normal space.
+
+    sample = sample.T                                # reshape into (n_sample,1).
+    z_sample = z_sample.T                            # reshape into (n_sample,1).
+    z_sample_pdf = norm.pdf(z_sample,0,1)            # z_sample's pdf in the normal space.
     
-    return dataNorm
+    return sample, z_sample, z_sample_pdf
 
 def fit_GMM(x,y):
     """ Fit the Gaussian mixture model (GMM).
@@ -101,11 +130,12 @@ def fit_GMM(x,y):
         x = x.reshape(-1,1) 
         
     nVar = np.shape(x)[1]
-    n_components = np.arange(1, nVar+20) # Note: +20 is hard coded.
+    n_components = np.arange(1, nVar+20) # Note: +20 is hard coded. Total number of candidate GMMs.
     
     # Combine all the variables of x and y, and treat them as multivariates of the Gaussian mixture model.
     data = np.concatenate((x,y), axis=1)
-    models = [GaussianMixture(n,covariance_type='full').fit(data) for n in n_components]
+    models = [GaussianMixture(n,covariance_type='full',max_iter=1000,n_init=10).fit(data) \
+              for n in n_components]
     
     # Part 2. Compute the BIC score for each model.
     gmm_model_comparisons=pd.DataFrame({"n_components" : n_components,
@@ -119,10 +149,14 @@ def fit_GMM(x,y):
     
     return best_model
 
-def generate_GMM_sample(gmm, n_samples):
-    """Generate random samples from the fitted Gaussian mixture model (GMM).
+def sample_from_GMM(gmm, n_samples):
+    """
+    Generate random samples from the fitted Gaussian mixture model (GMM).
     reference: https://github.com/scikit-learn/scikit-learn/blob/2beed5584/sklearn/mixture/_base.py#L396
     Note this function is re-wrote here because sklearn.mixture.GaussianMixture fixes its random seed in sampling.
+    
+    'Full' means the components may independently adopt any position and shape.
+    reference: https://stats.stackexchange.com/questions/326671/different-covariance-types-for-gaussian-mixture-models#:~:text=A%20Gaussian%20distribution%20is%20completely,all%20of%20which%20are%20ellipsoids.
     
     Parameters
     -------
@@ -146,29 +180,13 @@ def generate_GMM_sample(gmm, n_samples):
 
     return (X, y)
 
-def generate_data_sample(data, n_samples):
-
-    data = data.reshape((1,len(data)))
-
-    kde = gaussian_kde(data)
-    MC_data = kde.resample(n_samples)
-
-    cdf_function = np.vectorize(lambda x: kde.integrate_box_1d(-np.inf, x))
-    MC_dataCDF = cdf_function(MC_data)
-    MC_dataNorm = norm.ppf(MC_dataCDF, loc=0, scale=1)
-
-    MC_data = MC_data.T
-    MC_dataNorm = MC_dataNorm.T
-    MC_dataNorm_pdf = norm.pdf(MC_dataNorm,0,1)
-    return MC_data, MC_dataNorm, MC_dataNorm_pdf
-
-def calculate_GMM_y_conditional_pdf(x,y,gmm):
-    ''' Calculate the conditional pdf of y in the fitted Gaussian mixture model (GMM).
+def calculate_GMM_y_conditional_pdf(multivariateData,gmm):
+    ''' 
+    Calculate the conditional pdf of y in the fitted Gaussian mixture model (GMM).
     
     Parameters
     -------
-    x: scalar.
-    y: array, shape (nMC,1).
+    multivariateData: matrix. [X,Y] values in normal space. shape (nMC,Xvar_num+1).
     gmm : object. Fitted GMM.
     
     Returns
@@ -177,79 +195,54 @@ def calculate_GMM_y_conditional_pdf(x,y,gmm):
     
     Notes
     -------
-    # There are two approaches of calculating conditional pdf of y. 
-    # Both approaches are coded here and have been tested working successfully.
-    # However, method 1 is faster, so it is adopted in practice.
-    - Equation number here is referred to paper: Hu, Z. and Mahadevan, S., 2019. 
-    - Probability models for data-driven global sensitivity analysis. Reliability Engineering & System Safety, 187, pp.40-57.'''
+    - There are two approaches of calculating conditional pdf of y. 
+    - The presented method is faster, so it is adopted here.
+    - The second method is based on Eqs 32-35 of Hu, Z. and Mahadevan, S., 2019. 
+    - Probability models for data-driven global sensitivity analysis. 
+    - Reliability Engineering & System Safety, 187, pp.40-57.
+    '''
     
     # Get attributes of the fitted GMM and y
     gmmWeights = gmm.weights_          # shape (n_components,)
     gmmMeans = gmm.means_              # shape (n_components, n_variables). n_variables = n_feature in sklearn.mixture.GaussianMixture reference.
     gmmCovariances = gmm.covariances_  # (n_components, n_variables, n_variables) if covariance_type = ‘full’ (by default).    
     gmmNComponents = gmm.n_components  # number of components
-    nMC = len(y)                       # number of Monte Carlo samples
+    nMC = np.shape(multivariateData)[0] # number of Monte Carlo samples
 
-    # Method 1. use the relationship f(y|x) = f(x,y)/f(x) 
+    # Method: use the relationship f(y|x) = f(x,y)/f(x) 
     # step 1. calculate f(x,y), joint pdf of (x,y) of the fitted GMM.
     # step 2. calculate f(x), marginal pdf of x of the fitted GMM.
     # step 3. calculate f(y|x), conditional pdf of y on x of the fitted GMM.
 
     # step 1. calculate f(x,y), joint pdf of (x,y) of the fitted GMM.
-    multivariateData = np.concatenate((np.ones((nMC,1))*x,y), axis=1)  # combine x and y into a multi-variate data array. Shape (nMC, nVar+1).
-    logProb = gmm.score_samples(multivariateData)                      # compute the log probability of multivariateData under the model.
-    xyJointPDF = np.exp(logProb)                                       # get the joint probability of multivariateData of GMM.
+    logProb = gmm.score_samples(multivariateData)  # compute the log probability of multivariateData under the model.
+    xyJointPDF = np.exp(logProb)                   # get the joint probability of multivariateData of GMM.
     
-    # step 2. calculate f(x), marginal pdf of x in the the fitted GMM.
-    xMarginalPDFCpnt = [multivariate_normal.pdf(x, mean=gmmMeans[iComponent,:-1], cov=gmmCovariances[iComponent,:-1,:-1]) for iComponent in range(gmmNComponents)] # φ(x), shape(nComponent).
+    # step 2. calculate f(x), marginal pdf of x in the the fitted GMM. shape(nComponent).
+    xMarginalPDFCpnt = [multivariate_normal.pdf(multivariateData[0,0:-1], mean=gmmMeans[iComponent,:-1], 
+                                                cov=gmmCovariances[iComponent,:-1,:-1]) for iComponent in range(gmmNComponents)] 
     xMarginalPDF = sum(xMarginalPDFCpnt*gmmWeights)
     
     # step 3. calculate f(y|x), conditional pdf of y on x in the fitted GMM.    
     yCondPDF = np.divide(xyJointPDF,xMarginalPDF)
     yCondPDF = yCondPDF.reshape(-1,1)
 
-#     # Method 2. follow Eqs 32-35 of Hu, Z. and Mahadevan, S., 2019. 
-#     # Step 1. calculate conditional weight of the GMM components given x (Eq 35).
-#     # Step 2. calculate conditional mean and variance of y on x (Eqs 33-34).
-#     # Step 3. calculate conditional pdf of y on x, f(y|x) (Eq 32).
-
-#     # Step 1. calcualte conditional weights of the GMM components given x, λ(x) (Eq 35). Note λ(x)!=λ.
-#     xMarginalPDFCpnt = [multivariate_normal.pdf(x, mean=gmmMeans[iComponent,:-1], cov=gmmCovariances[iComponent,:-1,:-1]) for iComponent in range(gmmNComponents)] # φ(x), shape(nComponent).
-#     xMarginalPDFCpnt_weighted = xMarginalPDFCpnt*gmmWeights # λ*φ(x). shape(nComponent).  
-#     print(np.shape(xMarginalPDFCpnt_weighted))
-#     condGmmWeights = xMarginalPDFCpnt_weighted/sum(xMarginalPDFCpnt_weighted) # λ(x) = λ*φ(x)/sum(λ*φ(x)). shape(nComponent,).
-#     condGmmWeights = np.reshape(condGmmWeights,(len(condGmmWeights),1)) # reshape to (nComponent,1) for dot multiplication.
-
-#     # Loop steps 2 and 3 for each GMM component.
-#     yCondPDFCpnt = np.zeros((nMC, gmmNComponents)) # f(y|x) for each GMM component.
-#     for iCompoment in range(gmmNComponents):            
-#         # Step 2. calculate conditional mean and variance of y on x (Eqs 33-34).
-#         xyCov = gmmCovariances[iCompoment,-1,:-1]                                                   # covariance between x and y.
-#         xxCov = gmmCovariances[iCompoment,:-1,:-1]                                                  # (co)variance of x.
-#         xMean = gmmMeans[iCompoment,:-1]                                                            # mean of x.
-#         yCondMean = gmmMeans[iCompoment,-1] + xyCov@np.linalg.inv(xxCov)@(x-xMean)                  # conditional mean of y, (Eq 33).
-#         yCondVar = gmmCovariances[iCompoment,-1,-1] - xyCov@np.linalg.inv(xxCov)@xyCov.transpose()  # conditional variance of y, (Eq 34).
-
-#         # Step 3. calculate conditional pdf of y on x, f(y|x) in each GMM component (Eq 32).
-#         yCondPDFCpnt[:,iCompoment] = (multivariate_normal.pdf(y,mean=yCondMean, cov=yCondVar))      # (Eq 32)
-
-#     # Finally. calculate mean f(y|x) over all GMM components via weighted sum λ(x)*f(y|x).
-#     yCondPDF = yCondPDFCpnt@condGmmWeights                                                          # (Eq 32). shape(nMC,1)
-
     return yCondPDF
 
-def GMCM_GSA(x,y,xNorm,yNorm,sensType,GSAIndex,nMC):
-    """ Gaussian Mixture Copula-Based Estimator for first-order and total-effect sensitivity indices.
-        reference: https://scikit-learn.org/0.16/modules/generated/sklearn.mixture.GMM.html
-        reference: https://stackoverflow.com/questions/67656842/cumulative-distribution-function-cdf-in-scikit-learn
+def GMCM_GSA(x,y,zx,zy,sensType,GSAIndex,nMC):
+    """ 
+    Gaussian Mixture Copula-Based Estimator for first-order and total-effect sensitivity indices.
+    reference: https://scikit-learn.org/0.16/modules/generated/sklearn.mixture.GMM.html
+    reference: https://stackoverflow.com/questions/67656842/cumulative-distribution-function-cdf-in-scikit-learn
     
     Parameters
     -------
-    x: scalar or array, shape (n_samples, n_variables). X values in normal space. 
-    y: scalar or array. Y values in normal space. 
-       - Recall that when fitting GMM, x (variable) and y (response) are combined to be the multivariates of GMM.
+    x: array, shape (n_samples, n_variables). X values in normal space. 
+    y: array, shape (n_samples, 1). Y values in normal space. 
+    zx: array, shape (n_samples, n_variables). Standardized X values in normal space. 
+    zy: array, shape (n_samples, 1). Standardized Y values in normal space. 
     sensType: str. Type of Sensitivity index calculation. Two options: first, total.
-    GSAIndex: list. List of indices of x variable groups for sensitivity analysis. eg, [[0]], or [[0],[1],[2]], or [[0,1],[0,2],[1,2]]. 
+    GSAIndex: list. List of indices of x variable groups to be evaluated. eg, [[0]], or [[0],[1],[2]], or [[0,1],[0,2],[1,2]]. 
     nMC: int. Number of Monte Carlo samples. 
     
     Returns
@@ -258,33 +251,22 @@ def GMCM_GSA(x,y,xNorm,yNorm,sensType,GSAIndex,nMC):
     
     Notes
     -------
+    - When fitting GMM, x (variable) and y (response) are combined to be the multivariates of GMM.
     - Equation number here is referred to paper: Hu, Z. and Mahadevan, S., 2019. 
     - Probability models for data-driven global sensitivity analysis. Reliability Engineering & System Safety, 187, pp.40-57."""
 
     # Part 1. Standardize x and y samples.
-    [nSample, nVar] = np.shape(x)
-#     xNorm = np.zeros_like(x)     
+#     [nSample, nVar] = np.shape(x)
+#     zx = np.zeros_like(x)     
 #     for iVar in range(nVar):
-#         xNorm[:,iVar] = standardize_data(x[:,iVar])         
-#     yNorm = standardize_data(y)
+#         zx[:,iVar] = standardize_data(x[:,iVar])         
+#     zy = standardize_data(y)
 
-
-    # Part 2. Calculate y variance and generate Monte Carlo y samples in normal space.
+    # Part 2. Calculate y variance and generate Monte Carlo y samples based on given y.
+    # Note: y is sampled here, not in the 2nd loop, because this can help avoid poor cdf-y extrapolation.
+    # when y data are highly skwewed.
     varY = np.var(y)
-    MC_y, MC_yNorm, MC_yNorm_pdf = generate_data_sample(y, nMC)
-    
-#     # Generate nMC y samples in the uniform manner from CDF [0,1].
-#     # Note: Uniformly sample y CDF, not y, because the integration/sum is based on v=cdf(y).
-#     MC_yCDF = np.linspace(0.0001,0.999,num=nMC)               # cdf of y in range of (0,1).
-#     MC_yCDF = MC_yCDF.reshape(-1,1)                           # reshape MC_yCDF into (nMC,1).           
-
-#     MC_yNorm = norm.ppf(MC_yCDF,0,1)                          # inverse of cdf in normal space, ie, F^(-1), percent point function.
-#     MC_yNorm_pdf = norm.pdf(MC_yNorm,0,1)                     # pdf of MC_yNorm in normal space.
-
-#     MC_y = np.zeros_like(MC_yCDF)                             # y in original space.
-#     pctls = MC_yCDF[:,0]*100                                  # convert cdf to percentiles in range of (0,100).
-#     MC_y[:,0] = np.percentile(y, pctls)                       # calculate y in original space based on the observed y(response) samples.
-    
+    MC_y, MC_zy, MC_zy_pdf = sample_from_data(y, nMC)   
 
     # Part 3. Calculate sensitivity index.    
     if sensType == 'first':
@@ -293,82 +275,109 @@ def GMCM_GSA(x,y,xNorm,yNorm,sensType,GSAIndex,nMC):
         print('Calculating total-effect sensitivity indices...')        
 
     nGSAGroup = len(GSAIndex)           # total number of variable groups for sensitivity analysis
-    sensIndex = np.zeros((nGSAGroup,))  # output array to store sensitivity index  
-    sensIndex2 = np.zeros((nGSAGroup,)) # approach 2 output
+    sensIndex = np.zeros((nGSAGroup,))  # approach 1 output of sensitivity index  
+    sensIndex2 = np.zeros((nGSAGroup,)) # approach 2 output of sensitivity index 
 
     # Loop variable groups
     for iGSA in range(nGSAGroup):
         print('--- variable group %s ---'%(GSAIndex[iGSA]))
 
-        # (1) Identify to-be-evaluated iGSA_xNorm
+        # (1) Identify to-be-evaluated iGSA_zx
         if sensType == 'first':
-            iGSA_xNorm = xNorm[:,GSAIndex[iGSA]]        
+            iGSA_zx = zx[:,GSAIndex[iGSA]]        
 
         elif sensType == 'total':               
             drop_cols = GSAIndex[iGSA] # drop columns first
-            iGSA_xNorm = np.delete(xNorm, drop_cols, axis=1)
-
-        # (2) Build the joint PDF of GMM (gmm_pdf) by fitting Gaussian density components to x and y in normal space.
-        fitted_gmm = fit_GMM(iGSA_xNorm, yNorm)
+            iGSA_zx = np.delete(zx, drop_cols, axis=1)
         
+        # (2) Build the joint PDF of GMM (gmm_pdf) by fitting Gaussian density components to zx and zy in normal space.
+        print('fitting GMM...')
+        fitted_gmm = fit_GMM(iGSA_zx, zy)
+
+        # If gmm is not converged, report it and go to the next iGSA. 
         if not (fitted_gmm.converged_):
             print("ERROR: GMM fitting is not converged.")
-            sys.exit(0)
+            continue
 
-        # (3) Generate two sets of nMC x samples based on the fitted GMM.
-        # MC_xyNorm, MC_componentLabel = fitted_gmm.sample(nMC)               # Don't use the gmm built-in sample function because its random seed is fixed.
-        MC_xyNorm1, MC_componentLabel1 = generate_GMM_sample(fitted_gmm, nMC) # return data = (x,y) and each data corresponding component label    .
-        MC_xNorm1 = MC_xyNorm1[:,0:-1]                                        # keep only x.
+        # (3) Generate 1st GMM multivariable-samples based on the fitted GMM. 
+        # MC_z, MC_cpntLabel = fitted_gmm.sample(nMC)             # Don't use the gmm built-in sample function because its random seed is fixed.
+        MC_z1, MC_cpntLabel1 = sample_from_GMM(fitted_gmm, nMC)   # return z1 = (x,y) and each data corresponding component label.
 
-        # (4) Calculate Var(E(y|x)): variance of the expectation of y conditioned on x (Eq 24). 
-        # --- First loop of x samples to get E(y|x) (Eq 54).
-        condEy1 = np.zeros((nMC,1))
-        condVarY1 = np.zeros((nMC,1))
-        
-#         pbar = tqdm(total=nMC)
+        # (5) Calculate Var(E(y|x)): variance of the expectation of y conditioned on x (Eq 24). 
+        # --- 1st Loop.
+        # Loop zx samples to get E(y|x) given each zx(Eq 54). 
+        condEy = np.zeros((nMC,1))
+        condVarY = np.zeros((nMC,1))
+        print('calculating E(y|x)...')
+
         for iMC in range(nMC):
 
-            # Get the iMC^th x sample. 
-            iMC_xNorm = MC_xNorm1[iMC,:]  
+            # Get the iMC^th x sample. Sample number is 1.
+            iMC_zx = MC_z1[iMC,0:-1]   
+            
+            # Get the y sample. Sample number is nMC.
+            iMC_zy = MC_zy.flatten()
+            iMC_zy_pdf = MC_zy_pdf
+            iMC_y = MC_y
 
-            # Given x, calculate conditioanl pdf of y, f(y|x). Apply to all MC_yNorm samples (y loop).
-            MC_yNorm_gmmCondPDF = calculate_GMM_y_conditional_pdf(iMC_xNorm, MC_yNorm, fitted_gmm) 
+            # Construct 2nd GMM multivariable-samples.
+            MC_z2 = np.copy(MC_z1)
+            MC_z2[:,0:-1] = np.ones_like(MC_z2[:,0:-1])*iMC_zx
+            MC_z2[:,-1] = iMC_zy
 
-            # Given x, calculate conditional expectation of y, E(y|x) (Eq 54). Apply to all MC_yNorm samples (y loop).
-            iMC_condEy = sum(MC_y*(1/MC_yNorm_pdf)*MC_yNorm_gmmCondPDF)/float(nMC)   
-            iMC_condEy1_sqaure = sum(MC_y*MC_y*(1/MC_yNorm_pdf)*MC_yNorm_gmmCondPDF)/float(nMC)
+            # --- 2nd Loop.
+            # Aplly to all MC_zy samples using array operations. It is a hidden loop.
+            
+            # Given zx, compute conditional pdf of zy, f(zy|zx)=fGMM(z)/fGMM(zx). 
+            iMC_zy_gmmCondPDF = calculate_GMM_y_conditional_pdf(MC_z2, fitted_gmm) 
+            
+            # Given x, compute conditional pdf of y, f(y|x)=f(zy|zx)/zy_pdf.
+            iMC_y_gmmCondPDF = iMC_zy_gmmCondPDF/iMC_zy_pdf
+            
+            # Given x, compute conditional expectation of y, E(y|x) (Eq 54) and E(y^2|x) (Eq 55). 
+            iMC_condEy = sum(iMC_y*iMC_y_gmmCondPDF)/float(nMC)   
+            iMC_condEy_sqaure = sum(iMC_y*MC_y*iMC_y_gmmCondPDF)/float(nMC)
+            # --- End 2nd Loop.
 
-            # Save E(y|x).   
-            condEy1[iMC] = iMC_condEy 
-            condVarY1[iMC] = iMC_condEy1_sqaure - iMC_condEy*iMC_condEy
-
-#             pbar.update(1)
-#         pbar.close()                                  
+            # Save E(y|x) and Var(y|x).   
+            condEy[iMC] = iMC_condEy 
+            condVarY[iMC] = iMC_condEy_sqaure - iMC_condEy*iMC_condEy
+        # --- End 1st Loop.
 
         # --- Calculate Var(E(y|x)) (Eq 24).
-        varCondEy = np.var(condEy1) 
-        
-        # --- Calculate E(Var(y|x)) (Eq 28).
-        meanCondVarY = np.mean(condVarY1)
+        varCondEy = np.var(condEy) 
 
-        # (6) Calulcate sensitivity index.   
+        # --- Calculate E(Var(y|x)) (Eq 28).
+        meanCondVarY = np.mean(condVarY)
+
+        # (6) Calulcate sensitivity index using two approaches.   
         if sensType == 'first':
             iGSA_s = varCondEy/varY          # (Eq 3)  
             iGSA_s2 = 1 - meanCondVarY/varY  # (Eq 12)
-            
+
         elif sensType == 'total':
             iGSA_s = 1-varCondEy/varY      # (Eq 4)   
             iGSA_s2 = meanCondVarY/varY    # (Eq 5)   
 
         sensIndex[iGSA] = iGSA_s           # save result.  
         sensIndex2[iGSA] = iGSA_s2
-        
+
         print(iGSA_s,iGSA_s2)
     return sensIndex,sensIndex2
 
 def plot_GMM_clusters(x,y,gmm,ofile,title):
-    # reference: https://matplotlib.org/stable/gallery/lines_bars_and_markers/scatter_with_legend.html#sphx-glr-gallery-lines-bars-and-markers-scatter-with-legend-py
-    # reference: https://www.analyticsvidhya.com/blog/2019/10/gaussian-mixture-models-clustering/   
+    """ 
+    Gaussian Mixture Copula-Based Estimator for first-order and total-effect sensitivity indices.
+    reference: https://matplotlib.org/stable/gallery/lines_bars_and_markers/scatter_with_legend.html#sphx-glr-gallery-lines-bars-and-markers-scatter-with-legend-py
+    reference: https://www.analyticsvidhya.com/blog/2019/10/gaussian-mixture-models-clustering/   
+    
+    Parameters
+    -------
+    x: scalar or array, shape (n, 1) or (n,). X values in normal space. 
+    y: scalar or array, shape (n, 1) or (n,). Y values in normal space. 
+    gmm : object. Fitted GMM.
+    ofile: path. Path of output figure.
+    title: str. Title of the output figure."""     
     
     data = np.concatenate((x, y), axis=1) # Combine x and y as multivariates of the Gaussian mixture model.
 
@@ -388,7 +397,6 @@ def plot_GMM_clusters(x,y,gmm,ofile,title):
     ax.add_artist(legend1)
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
-#     ax.set_ylim(-4,4)
     plt.savefig(ofile)
     plt.show()    
         
