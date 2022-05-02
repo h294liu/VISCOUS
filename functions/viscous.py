@@ -28,7 +28,7 @@ def define_GSA_variable_index(nVar):
     
     Notes
     -------
-    For now only the first-order sensitivity is calculated, thus [[1],[2],[3]].
+    Interaction between varibales is disabled for now, thus [[1],[2],[3]].
     This code can be extended to explicitly calculate interaction effect 
     (eg, second-order, third-order sensitivity indices)."""
     
