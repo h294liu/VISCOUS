@@ -180,7 +180,7 @@ def sample_from_GMM(gmm, n_samples):
 
     return (X, y)
 
-def calculate_GMM_y_conditional_pdf(multivariateData,gmm):
+def calculate_GMM_conditional_pdf(multivariateData,gmm):
     ''' 
     Calculate the conditional pdf of y in the fitted Gaussian mixture model (GMM).
     
@@ -204,7 +204,8 @@ def calculate_GMM_y_conditional_pdf(multivariateData,gmm):
     
     # Get attributes of the fitted GMM and y
     gmmWeights = gmm.weights_          # shape (n_components,)
-    gmmMeans = gmm.means_              # shape (n_components, n_variables). n_variables = n_feature in sklearn.mixture.GaussianMixture reference.
+    gmmMeans = gmm.means_              # shape (n_components, n_variables). 
+                                       # n_variables = n_feature in sklearn.mixture.GaussianMixture reference.
     gmmCovariances = gmm.covariances_  # (n_components, n_variables, n_variables) if covariance_type = ‘full’ (by default).    
     gmmNComponents = gmm.n_components  # number of components
     nMC = np.shape(multivariateData)[0] # number of Monte Carlo samples
@@ -329,14 +330,14 @@ def GMCM_GSA(x,y,zx,zy,sensType,GSAIndex,nMC):
             # Aplly to all MC_zy samples using array operations. It is a hidden loop.
             
             # Given zx, compute conditional pdf of zy, f(zy|zx)=fGMM(z)/fGMM(zx). 
-            iMC_zy_gmmCondPDF = calculate_GMM_y_conditional_pdf(MC_z2, fitted_gmm) 
+            iMC_zy_gmmCondPDF = calculate_GMM_conditional_pdf(MC_z2, fitted_gmm) 
             
             # Given x, compute conditional pdf of y, f(y|x)=f(zy|zx)/zy_pdf.
             iMC_y_gmmCondPDF = iMC_zy_gmmCondPDF/iMC_zy_pdf
             
             # Given x, compute conditional expectation of y, E(y|x) (Eq 54) and E(y^2|x) (Eq 55). 
             iMC_condEy = sum(iMC_y*iMC_y_gmmCondPDF)/float(nMC)   
-            iMC_condEy_sqaure = sum(iMC_y*MC_y*iMC_y_gmmCondPDF)/float(nMC)
+            iMC_condEy_sqaure = sum(iMC_y*iMC_y*iMC_y_gmmCondPDF)/float(nMC)
             # --- End 2nd Loop.
 
             # Save E(y|x) and Var(y|x).   
